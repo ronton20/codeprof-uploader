@@ -33,6 +33,10 @@ Each upload sets the title, description, tags, thumbnail and playlist (the playl
 - **Fix the date:** `"publish_at_local": "2026-12-01 19:00"`.
 - **Re-upload:** delete the video in Studio, then set `"upload": {"status": "pending"}`.
 
+## Demo upload (for the API audit screencast)
+
+`SHORTS_DIR/Demo/Demo/` holds a 10-second test clip whose `upload.json` has `"demo": true`. Normal runs skip it. To upload it, even before the audit is approved, run `python upload.py upload --only Demo`. Before approval YouTube keeps it private. Delete the video and the "API Test" playlist in Studio afterwards.
+
 The API can't set a Short's related-video link, so the script prints the suggested one (`related_lesson`) for you to set in Studio.
 
 The default API quota allows roughly 6 uploads a day. When it runs out, the script stops cleanly and the next run continues where it left off. To run it daily, schedule `python upload.py upload` in Windows Task Scheduler (start in this folder).

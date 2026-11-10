@@ -7,6 +7,9 @@ Each lesson folder under SHORTS_DIR (<Topic>/<lesson>/) holds:
 The script uploads every lesson whose upload.json says status "pending" (and not "hold"),
 in "order", one per day at RELEASE_TIME, and writes the result back into upload.json.
 
+A lesson with "demo": true (e.g. SHORTS_DIR/Demo/Demo) is skipped by normal runs and is
+uploaded only with --only "<folder>", even before the audit is approved (it stays private).
+
 Usage (from this folder, with a .env next to this file):
   python upload.py check            test credentials and channel (read-only, ~1 quota unit)
   python upload.py plan             show what would be uploaded and when (offline, no API calls)
@@ -162,7 +165,7 @@ class Lesson:
     def problems(self):
         d, p = self.data, []
         for k in ("order", "series", "title", "description", "tags", "playlist"):
-            if not d.get(k):
+            if d.get(k) in (None, "", []):
                 p.append(f"missing {k}")
         t, desc = d.get("title", ""), d.get("description", "")
         if len(t) > 100:
@@ -197,7 +200,7 @@ def local_dt(cfg, s):
     return dt.datetime.strptime(s, "%Y-%m-%d %H:%M").replace(tzinfo=cfg["zone"])
 
 
-def assign_slots(cfg, lessons):
+def assign_slots(cfg, lessons, include_demo=False):
     """Pending lessons, in order, each get the earliest free day from tomorrow on
     (after the slot given to the lesson before it). A fixed publish_at_local in
     upload.json is used as is if it is still at least 2 hours away."""
@@ -208,7 +211,7 @@ def assign_slots(cfg, lessons):
     day = now.date() + dt.timedelta(days=1)
     plan = []
     for l in lessons:
-        if l.status != "pending" or l.data.get("hold"):
+        if l.status != "pending" or l.data.get("hold") or (l.data.get("demo") and not include_demo):
             continue
         fixed = l.data.get("publish_at_local")
         if fixed and local_dt(cfg, fixed) > now + dt.timedelta(hours=2):
@@ -358,6 +361,9 @@ def cmd_plan(cfg, a):
     for l, when in plan:
         p = l.problems()
         print(f"  #{l.data.get('order', 0):03d}  {when:%a %Y-%m-%d %H:%M}  {l.name}" + (f"   !! {'; '.join(p)}" if p else ""))
+    demos = [l.name for l in lessons if l.data.get("demo") and l.status == "pending"]
+    if demos:
+        print("Demo lessons (uploaded only with --only): " + ", ".join(demos))
     held = [l.name for l in lessons if l.status == "pending" and l.data.get("hold")]
     if held:
         print("On hold: " + ", ".join(held))
@@ -365,10 +371,17 @@ def cmd_plan(cfg, a):
 
 
 def cmd_upload(cfg, a):
-    if not cfg["audit_approved"]:
+    lessons = load_lessons(cfg)
+    target = [l for l in lessons if a.only and l.name.lower() == a.only.lower()]
+    demo_run = bool(target) and bool(target[0].data.get("demo"))
+    if a.only and not target:
+        sys.exit(f"No lesson folder named '{a.only}' with an upload.json.")
+    if demo_run:
+        print("Demo upload: a throwaway test video. Before the audit is approved it will stay private "
+              "(locked); delete it in YouTube Studio afterwards.")
+    elif not cfg["audit_approved"]:
         sys.exit("YT_AUDIT_APPROVED isn't true in .env. Videos uploaded before Google approves the audit "
                  "are locked private for good, so nothing was uploaded.")
-    lessons = load_lessons(cfg)
     tok = Token(cfg)
     title, _ = channel(cfg, tok)
     if title != cfg["channel"]:
@@ -376,7 +389,7 @@ def cmd_upload(cfg, a):
 
     # finish anything a previous run left half-done (uploaded but no thumbnail/playlist yet)
     todo = [(l, local_dt(cfg, l.data["upload"]["publish_at_local"])) for l in lessons if l.status == "uploaded"]
-    todo += assign_slots(cfg, lessons)
+    todo += assign_slots(cfg, lessons, include_demo=demo_run)
     if a.only:
         todo = [(l, w) for l, w in todo if l.name.lower() == a.only.lower()]
     if a.limit:
@@ -407,6 +420,13 @@ def cmd_upload(cfg, a):
                 notes.append(f"thumbnail not set ({e.reason or e.status}: {e.message})")
             u["playlist_id"] = add_to_playlist(tok, vid, l.data["playlist"], l.data["series"])
             s = video_status(tok, vid)
+            if demo_run and not s.get("publishAt") and not s.get("rejectionReason") and not s.get("failureReason"):
+                u.update({"status": "scheduled", "note": f"demo: YouTube kept it {s.get('privacyStatus')} (expected before the audit)"})
+                l.save()
+                done.append(l)
+                print(f"+ {l.name}: uploaded, {s.get('privacyStatus')} (expected before the audit approves "
+                      f"public releases)  https://youtube.com/shorts/{vid}")
+                continue
             if not s.get("publishAt") or s.get("rejectionReason") or s.get("failureReason"):
                 u["error"] = f"not scheduled as expected: {s}"
                 l.save()
@@ -461,6 +481,8 @@ def write_report(cfg, lessons, plan):
     planned = {id(l): w for l, w in plan}
     rows = []
     for l in lessons:
+        if l.data.get("demo"):
+            continue
         u, n = l.data["upload"], l.data.get("order", 0)
         if u.get("status") in ("scheduled", "uploaded", "manual"):
             when = u.get("publish_at_local") or "—"
